@@ -1,0 +1,40 @@
+--- a/overlay/exllamav3/modules/inkling2_b12x.py
++++ b/overlay/exllamav3/modules/inkling2_b12x.py
+@@ -263,7 +263,27 @@
+             k, v = part.split(":"); self.bms[int(k)] = int(v)
+         wm = json.load(open(model_dir + "/model.safetensors.index.json"))["weight_map"]
+         handles = {}
++        # I2_EXPERT_SHARD_DIR: expert tensors already cut for this rank (scripts/reshard_experts.py): the same checkpoint key names,
++        # the intermediate-half slice already applied, so no slicing here. Keys not in the shards (router, ...) still come from model_dir.
++        shard_dir = os.environ.get("I2_EXPERT_SHARD_DIR", "")
++        smap = {}
++        if shard_dir:
++            for fn in sorted(os.listdir(shard_dir)):
++                if fn.endswith(".safetensors"):
++                    with safe_open(os.path.join(shard_dir, fn), "pt", device = "cpu") as fh:
++                        for k in fh.keys(): smap[k] = os.path.join(shard_dir, fn)
++        def _drop_cache(path):
++            # unified memory (GB10): the page cache of the weight files counts against the 128 GB, drop what was just read
++            try:
++                fd = os.open(path, os.O_RDONLY); os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED); os.close(fd)
++            except OSError:
++                pass
+         def get(key, sl = None):
++            if key in smap:
++                f = smap[key]
++                if f not in handles:
++                    handles[f] = safe_open(f, "pt", device = "cpu")
++                return handles[f].get_tensor(key)
+             f = wm[key]
+             if f not in handles:
+                 handles[f] = safe_open(model_dir + "/" + f, "pt", device = "cpu")
+@@ -303,6 +323,9 @@
+             self.layers[LI] = lay
+             self.router_w[LI] = get(pre + "gate.weight").to(torch.float16).contiguous().to(dev)       # [E, K]
+             self.router_b[LI] = get(pre + "gate.bias").float().to(dev)
++            for _f in list(handles):
++                _drop_cache(_f if _f.startswith("/") else model_dir + "/" + _f)
++            handles.clear()     # close the safetensors handles per layer: on GB10 their memory (a CPU-side copy of every GPU tensor read) is only released when the handle is closed
+         self.K = K
+         # per layer: global expert id -> local index (or -1 = another group), and a pad expert of another group
+         self.expert_maps, self.pad_experts = {}, {}

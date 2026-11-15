@@ -1,0 +1,40 @@
+--- a/server/i2_server.py
++++ b/server/i2_server.py
+@@ -66,7 +66,8 @@
+     ks = sorted(_AVW); return _AVW[next((k for k in ks if k >= B), ks[-1])]
+ DRAFT_K = lambda K: 7 if args.adaptive else K
+ rank, world = int(os.environ["RANK"]), int(os.environ["WORLD_SIZE"])
+-torch.cuda.set_device(rank); dev = torch.device(f"cuda:{rank}")
++lrank = int(os.environ.get("LOCAL_RANK", rank))      # 4 hosts with one GPU each: LOCAL_RANK=0 (single host torchrun: LOCAL_RANK = rank)
++torch.cuda.set_device(lrank); dev = torch.device(f"cuda:{lrank}")
+ dist.init_process_group("nccl", device_id=dev)
+ def log(*x):
+     if rank == 0: print(time.strftime("%H:%M:%S"), *x, flush=True)
+@@ -791,10 +792,13 @@
+     if chat and body.get("raw_prompt"):      # extension: pre-rendered prompt in the model's chat format (eval harness)
+         prompt = body["raw_prompt"]
+     elif chat:
+-        prompt = render_prompt(norm_messages(body["messages"]), body.get("tools"), body.get("reasoning_effort"))
++        eff = body.get("reasoning_effort")
++        if eff is None and (body.get("chat_template_kwargs") or {}).get("enable_thinking") is False:
++            eff = "none"          # OpenAI-compatible clients (speed2/quality2) switch thinking off this way
++        prompt = render_prompt(norm_messages(body["messages"]), body.get("tools"), eff)
+     else:
+         prompt = body["prompt"] if isinstance(body["prompt"], str) else body["prompt"][0]
+-    ids = encode(prompt)
++    ids = list(prompt) if isinstance(prompt, list) else encode(prompt)     # token-id prompts (completions) are used as they are
+     max_tokens = int(body.get("max_completion_tokens") or body.get("max_tokens") or 4096)
+     temp = float(body.get("temperature", 0.0) or 0.0)
+     out_q = asyncio.Queue()
+--- a/bench/i2_sweep.py
++++ b/bench/i2_sweep.py
+@@ -26,7 +26,8 @@
+     os.environ["EXL3_LOAD_ARENA"] = "0"     # b12x repack frees the per-expert tensors; arena slabs would pin a second copy
+ 
+ rank, world = int(os.environ["RANK"]), int(os.environ["WORLD_SIZE"])
+-torch.cuda.set_device(rank); dev = torch.device(f"cuda:{rank}")
++lrank = int(os.environ.get("LOCAL_RANK", rank))      # 4 hosts with one GPU each: LOCAL_RANK=0 (single host torchrun: LOCAL_RANK = rank)
++torch.cuda.set_device(lrank); dev = torch.device(f"cuda:{lrank}")
+ dist.init_process_group("nccl", device_id=dev)
+ def log(*x):
+     if rank == 0: print(time.strftime("%H:%M:%S"), *x, flush=True)
